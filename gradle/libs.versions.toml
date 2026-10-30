@@ -1,0 +1,17 @@
+[versions]
+quarkus = "3.27.0"
+temporal = "1.31.0"
+junit = "5.13.4"
+assertj = "3.27.3"
+santuario = "4.0.4"
+
+[libraries]
+quarkus-bom = { module = "io.quarkus.platform:quarkus-bom", version.ref = "quarkus" }
+temporal-sdk = { module = "io.temporal:temporal-sdk", version.ref = "temporal" }
+temporal-testing = { module = "io.temporal:temporal-testing", version.ref = "temporal" }
+santuario = { module = "org.apache.santuario:xmlsec", version.ref = "santuario" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+assertj = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+
+[plugins]
+quarkus = { id = "io.quarkus", version.ref = "quarkus" }

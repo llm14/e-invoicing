@@ -1,0 +1,21 @@
+plugins {
+    alias(libs.plugins.quarkus)
+}
+
+dependencies {
+    implementation enforcedPlatform(libs.quarkus.bom)
+    implementation project(':invoice-domain')
+    implementation project(':invoice-crypto')
+    implementation project(':invoice-workflows')
+
+    implementation 'io.quarkus:quarkus-rest-jackson'
+    implementation 'io.quarkus:quarkus-messaging-kafka'
+    implementation 'io.quarkus:quarkus-hibernate-orm-panache'
+    implementation 'io.quarkus:quarkus-jdbc-postgresql'
+    implementation 'io.quarkus:quarkus-flyway'
+    implementation 'io.quarkus:quarkus-smallrye-health'
+    implementation 'io.quarkus:quarkus-arc'
+
+    testImplementation 'io.quarkus:quarkus-junit5'
+    testImplementation 'io.rest-assured:rest-assured'
+}
