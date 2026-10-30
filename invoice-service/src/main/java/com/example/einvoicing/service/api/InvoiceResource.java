@@ -1,7 +1,11 @@
 package com.example.einvoicing.service.api;
 
+import com.example.einvoicing.service.InvoiceIntake;
 import com.example.einvoicing.service.InvoiceService;
+import com.example.einvoicing.service.temporal.InvoiceWorkflows;
+import io.temporal.client.WorkflowNotFoundException;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.NotFoundException;
@@ -23,14 +27,34 @@ public class InvoiceResource {
     @Inject
     InvoiceService service;
 
+    @Inject
+    InvoiceIntake intake;
+
+    @Inject
+    InvoiceWorkflows workflows;
+
     @POST
     public Response submit(SubmitInvoiceRequest request, @Context UriInfo uriInfo) {
         if (request == null) {
             throw new IllegalArgumentException("request body is required");
         }
-        var invoice = service.submit(request.toDocument());
+        var invoice = intake.receive(request.toDocument());
         var location = uriInfo.getAbsolutePathBuilder().path(invoice.id().toString()).build();
         return Response.created(location).entity(InvoiceResponse.from(invoice)).build();
+    }
+
+    /** Asks the running workflow to stop; takes effect at the next step boundary. */
+    @POST
+    @Path("/{id}/cancel")
+    @Consumes(MediaType.WILDCARD)
+    public Response cancel(@PathParam("id") UUID id) {
+        service.find(id).orElseThrow(NotFoundException::new);
+        try {
+            workflows.cancel(id);
+        } catch (WorkflowNotFoundException e) {
+            throw new WebApplicationException("No running workflow for this invoice", Response.Status.CONFLICT);
+        }
+        return Response.accepted().build();
     }
 
     @GET

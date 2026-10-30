@@ -2,6 +2,7 @@ package com.example.einvoicing.service;
 
 import com.example.einvoicing.domain.Invoice;
 import com.example.einvoicing.domain.InvoiceDocument;
+import com.example.einvoicing.service.messaging.OutboxRepository;
 import com.example.einvoicing.service.persistence.InvoiceRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -15,6 +16,9 @@ public class InvoiceService {
     @Inject
     InvoiceRepository repository;
 
+    @Inject
+    OutboxRepository outbox;
+
     @Transactional
     public Invoice submit(InvoiceDocument document) {
         if (repository.exists(document.issuer().taxId(), document.number())) {
@@ -22,7 +26,15 @@ public class InvoiceService {
         }
         var invoice = Invoice.receive(document);
         repository.save(invoice);
+        outbox.record(invoice);
         return invoice;
+    }
+
+    /** Persists a lifecycle change to an already submitted invoice and queues its event. */
+    @Transactional
+    public void save(Invoice invoice) {
+        repository.save(invoice);
+        outbox.record(invoice);
     }
 
     @Transactional

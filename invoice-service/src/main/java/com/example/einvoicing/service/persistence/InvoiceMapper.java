@@ -65,7 +65,7 @@ public final class InvoiceMapper {
         return new Invoice(entity.id, document, status(entity), entity.signedXml);
     }
 
-    private static String statusCode(InvoiceStatus status) {
+    public static String statusCode(InvoiceStatus status) {
         return switch (status) {
             case InvoiceStatus.Received r -> "RECEIVED";
             case InvoiceStatus.Validated v -> "VALIDATED";
