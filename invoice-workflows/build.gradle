@@ -1,0 +1,5 @@
+dependencies {
+    api project(':invoice-domain')
+    api libs.temporal.sdk
+    testImplementation libs.temporal.testing
+}

@@ -1,0 +1,10 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'e-invoicing'
+
+include 'invoice-domain', 'invoice-crypto', 'invoice-workflows', 'invoice-service'

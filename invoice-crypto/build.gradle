@@ -1,0 +1,4 @@
+dependencies {
+    api project(':invoice-domain')
+    implementation libs.santuario
+}
