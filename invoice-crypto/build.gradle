@@ -1,4 +1,6 @@
 dependencies {
     api project(':invoice-domain')
-    implementation libs.santuario
+
+    // test-only: used to generate CA / leaf certificates
+    testImplementation libs.bouncycastle.pkix
 }
