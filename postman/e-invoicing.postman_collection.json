@@ -1,0 +1,270 @@
+{
+  "info": {
+    "name": "E-Invoicing (invoice-service)",
+    "description": "Manual tests for invoice-service REST API. Start the stack with `docker compose up -d` and the service with `gradlew :invoice-service:quarkusDev`.\n\nRun the requests in order: 'Submit invoice' stores {{invoiceId}}, which the GET and cancel requests reuse. Watch the workflow at http://localhost:8233 and the events on the invoices.events topic.\n\nNote: with the default app.delivery.failure-rate=0.0 the workflow finishes in well under a second, so 'Cancel' normally returns 409 (no running workflow). Start the service with app.delivery.failure-rate=1.0 to keep delivery retrying and make cancel succeed.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "invoiceId", "value": "" },
+    { "key": "invoiceNumber", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Submit invoice (valid)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// A fresh number per run avoids the 409 duplicate check on (issuer tax id, number).",
+              "pm.collectionVariables.set('invoiceNumber', 'PM-' + Date.now());"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created with Location header', function () {",
+              "    pm.response.to.have.status(201);",
+              "    pm.response.to.have.header('Location');",
+              "});",
+              "const body = pm.response.json();",
+              "pm.test('starts as RECEIVED', function () { pm.expect(body.status).to.eql('RECEIVED'); });",
+              "pm.collectionVariables.set('invoiceId', body.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"number\": \"{{invoiceNumber}}\",\n  \"issueDate\": \"2026-06-01\",\n  \"issuer\": {\"name\": \"ACME Lda\", \"taxId\": \"PT500000000\", \"countryCode\": \"PT\"},\n  \"customer\": {\"name\": \"Client SA\", \"taxId\": \"ES600000000\", \"countryCode\": \"ES\"},\n  \"currency\": \"EUR\",\n  \"lines\": [\n    {\"description\": \"Widget\", \"quantity\": 3, \"unitPrice\": 19.99, \"taxRatePercent\": 23},\n    {\"description\": \"Gadget\", \"quantity\": 1, \"unitPrice\": 120.00, \"taxRatePercent\": 6}\n  ]\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/invoices", "host": ["{{baseUrl}}"], "path": ["invoices"] },
+        "description": "Stores the invoice and starts the Temporal workflow (validate, sign, deliver). Expect 201."
+      }
+    },
+    {
+      "name": "Get invoice",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+              "const body = pm.response.json();",
+              "pm.test('id matches', function () { pm.expect(body.id).to.eql(pm.collectionVariables.get('invoiceId')); });",
+              "// Re-send until the workflow is done: RECEIVED -> VALIDATED -> SIGNED -> DELIVERED (or REJECTED)."
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/invoices/{{invoiceId}}", "host": ["{{baseUrl}}"], "path": ["invoices", "{{invoiceId}}"] },
+        "description": "Poll this until the status is DELIVERED. A finished invoice also carries the signed XML."
+      }
+    },
+    {
+      "name": "Submit invoice (rejected by workflow: zero price)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.collectionVariables.set('invoiceNumber', 'PM-ZERO-' + Date.now());"]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', function () { pm.response.to.have.status(201); });",
+              "pm.collectionVariables.set('invoiceId', pm.response.json().id);",
+              "// GET it a moment later: status becomes REJECTED with 'gross total must be positive'."
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"number\": \"{{invoiceNumber}}\",\n  \"issueDate\": \"2026-06-01\",\n  \"issuer\": {\"name\": \"ACME Lda\", \"taxId\": \"PT500000000\", \"countryCode\": \"PT\"},\n  \"customer\": {\"name\": \"Client SA\", \"taxId\": \"ES600000000\", \"countryCode\": \"ES\"},\n  \"currency\": \"EUR\",\n  \"lines\": [{\"description\": \"Free sample\", \"quantity\": 1, \"unitPrice\": 0, \"taxRatePercent\": 23}]\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/invoices", "host": ["{{baseUrl}}"], "path": ["invoices"] },
+        "description": "Accepted by the API but rejected by the workflow's validation step (compensation path)."
+      }
+    },
+    {
+      "name": "Submit invoice (rejected by workflow: issuer = customer)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.collectionVariables.set('invoiceNumber', 'PM-SELF-' + Date.now());"]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', function () { pm.response.to.have.status(201); });",
+              "pm.collectionVariables.set('invoiceId', pm.response.json().id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"number\": \"{{invoiceNumber}}\",\n  \"issueDate\": \"2026-06-01\",\n  \"issuer\": {\"name\": \"ACME Lda\", \"taxId\": \"PT500000000\", \"countryCode\": \"PT\"},\n  \"customer\": {\"name\": \"ACME Lda\", \"taxId\": \"PT500000000\", \"countryCode\": \"PT\"},\n  \"currency\": \"EUR\",\n  \"lines\": [{\"description\": \"Widget\", \"quantity\": 1, \"unitPrice\": 10, \"taxRatePercent\": 23}]\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/invoices", "host": ["{{baseUrl}}"], "path": ["invoices"] },
+        "description": "Issuer and customer are the same party, so the workflow rejects it."
+      }
+    },
+    {
+      "name": "Submit duplicate (409)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('409 Conflict', function () { pm.response.to.have.status(409); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"number\": \"{{invoiceNumber}}\",\n  \"issueDate\": \"2026-06-01\",\n  \"issuer\": {\"name\": \"ACME Lda\", \"taxId\": \"PT500000000\", \"countryCode\": \"PT\"},\n  \"customer\": {\"name\": \"Client SA\", \"taxId\": \"ES600000000\", \"countryCode\": \"ES\"},\n  \"currency\": \"EUR\",\n  \"lines\": [{\"description\": \"Widget\", \"quantity\": 1, \"unitPrice\": 10, \"taxRatePercent\": 23}]\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/invoices", "host": ["{{baseUrl}}"], "path": ["invoices"] },
+        "description": "Re-sends the last invoice number for the same issuer tax id, which the unique constraint rejects. Run it right after one of the submit requests, without re-running a submit in between."
+      }
+    },
+    {
+      "name": "Submit invalid (400: no lines)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 Bad Request', function () { pm.response.to.have.status(400); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"number\": \"PM-INVALID\",\n  \"issueDate\": \"2026-06-01\",\n  \"issuer\": {\"name\": \"ACME Lda\", \"taxId\": \"PT500000000\", \"countryCode\": \"PT\"},\n  \"customer\": {\"name\": \"Client SA\", \"taxId\": \"ES600000000\", \"countryCode\": \"ES\"},\n  \"currency\": \"EUR\",\n  \"lines\": []\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/invoices", "host": ["{{baseUrl}}"], "path": ["invoices"] },
+        "description": "Domain validation failure mapped to 400."
+      }
+    },
+    {
+      "name": "Submit invalid (400: empty body)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('4xx client error', function () { pm.expect(pm.response.code).to.be.within(400, 415); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{baseUrl}}/invoices", "host": ["{{baseUrl}}"], "path": ["invoices"] },
+        "description": "No body at all."
+      }
+    },
+    {
+      "name": "Cancel invoice workflow",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('202 Accepted, or 409 if the workflow already finished', function () {",
+              "    pm.expect(pm.response.code).to.be.oneOf([202, 409]);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/invoices/{{invoiceId}}/cancel", "host": ["{{baseUrl}}"], "path": ["invoices", "{{invoiceId}}", "cancel"] },
+        "description": "Signals the running workflow to stop at the next step boundary. 202 if running, 409 if there is no running workflow, 404 if the invoice is unknown."
+      }
+    },
+    {
+      "name": "Get invoice (404 unknown id)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('404 Not Found', function () { pm.response.to.have.status(404); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/invoices/00000000-0000-0000-0000-000000000000", "host": ["{{baseUrl}}"], "path": ["invoices", "00000000-0000-0000-0000-000000000000"] }
+      }
+    },
+    {
+      "name": "Cancel invoice (404 unknown id)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('404 Not Found', function () { pm.response.to.have.status(404); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/invoices/00000000-0000-0000-0000-000000000000/cancel", "host": ["{{baseUrl}}"], "path": ["invoices", "00000000-0000-0000-0000-000000000000", "cancel"] }
+      }
+    }
+  ]
+}
