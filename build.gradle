@@ -28,6 +28,11 @@ subprojects {
     }
 
     tasks.withType(Test).configureEach {
-        useJUnitPlatform()
+        // Tests tagged "slow" are skipped unless run with -PslowTests
+        useJUnitPlatform {
+            if (!project.hasProperty('slowTests')) {
+                excludeTags 'slow'
+            }
+        }
     }
 }

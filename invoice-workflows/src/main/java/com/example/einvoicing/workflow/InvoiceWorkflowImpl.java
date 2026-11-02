@@ -47,6 +47,17 @@ public class InvoiceWorkflowImpl implements InvoiceWorkflow {
                             .build())
                     .build());
 
+    /** Only writes a database row, but must not give up: every run has to report its result. */
+    private final InvoiceActivities results = Workflow.newActivityStub(
+            InvoiceActivities.class,
+            ActivityOptions.newBuilder()
+                    .setStartToCloseTimeout(Duration.ofSeconds(30))
+                    .setRetryOptions(RetryOptions.newBuilder()
+                            .setInitialInterval(Duration.ofSeconds(1))
+                            .setMaximumInterval(Duration.ofSeconds(30))
+                            .build())
+                    .build());
+
     private String status = "VALIDATING";
     private boolean cancelRequested;
 
@@ -71,6 +82,7 @@ public class InvoiceWorkflowImpl implements InvoiceWorkflow {
             }
             compensate(invoiceId, "cancelled by request");
         }
+        results.publishResult(invoiceId);
     }
 
     @Override

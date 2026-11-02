@@ -9,6 +9,7 @@ import jakarta.inject.Inject;
 import jakarta.persistence.LockModeType;
 import java.time.Instant;
 import java.util.List;
+import java.util.UUID;
 import org.hibernate.LockOptions;
 
 /**
@@ -18,16 +19,36 @@ import org.hibernate.LockOptions;
 @ApplicationScoped
 public class OutboxRepository implements PanacheRepository<OutboxEventEntity> {
 
+    /** Outbox event type of a workflow's final result; the relay sends it to {@code workflow.results}. */
+    public static final String WORKFLOW_RESULT = "workflow.result";
+
     @Inject
     ObjectMapper mapper;
 
     /** Must be called inside the transaction that persists the invoice change. */
     public void record(Invoice invoice) {
         var event = InvoiceEvent.of(invoice);
+        persist(invoice.id(), "invoice." + event.status().toLowerCase(), event.occurredAt(), event);
+    }
+
+    /**
+     * Queues the workflow's final result for {@code workflow.results}, once per invoice: a re-run of
+     * the activity (Temporal may repeat it) finds the row and does nothing.
+     * Must be called inside a transaction.
+     */
+    public void recordResult(Invoice invoice) {
+        if (count("aggregateId = ?1 and type = ?2", invoice.id(), WORKFLOW_RESULT) > 0) {
+            return;
+        }
+        var event = WorkflowResultEvent.of(invoice);
+        persist(invoice.id(), WORKFLOW_RESULT, event.occurredAt(), event);
+    }
+
+    private void persist(UUID aggregateId, String type, Instant createdAt, Object event) {
         var entity = new OutboxEventEntity();
-        entity.aggregateId = invoice.id();
-        entity.type = "invoice." + event.status().toLowerCase();
-        entity.createdAt = event.occurredAt();
+        entity.aggregateId = aggregateId;
+        entity.type = type;
+        entity.createdAt = createdAt;
         try {
             entity.payload = mapper.writeValueAsString(event);
         } catch (JsonProcessingException e) {

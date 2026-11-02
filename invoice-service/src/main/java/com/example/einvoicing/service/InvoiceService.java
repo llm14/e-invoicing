@@ -37,6 +37,12 @@ public class InvoiceService {
         outbox.record(invoice);
     }
 
+    /** Queues the final workflow result of a finished invoice; does nothing if already queued. */
+    @Transactional
+    public void recordResult(Invoice invoice) {
+        outbox.recordResult(invoice);
+    }
+
     @Transactional
     public Optional<Invoice> find(UUID id) {
         return repository.find(id);
