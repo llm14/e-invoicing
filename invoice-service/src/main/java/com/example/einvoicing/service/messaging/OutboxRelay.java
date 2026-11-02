@@ -27,7 +27,11 @@ public class OutboxRelay {
 
     @Inject
     @Channel("invoice-events")
-    MutinyEmitter<String> emitter;
+    MutinyEmitter<String> invoiceEvents;
+
+    @Inject
+    @Channel("workflow-results")
+    MutinyEmitter<String> workflowResults;
 
     // The first tick would otherwise race the messaging runtime, which connects the emitter
     // channel asynchronously after startup. Unsent rows simply wait in the table.
@@ -36,7 +40,7 @@ public class OutboxRelay {
     void relay() {
         for (var event : outbox.lockUnsent(BATCH_SIZE)) {
             try {
-                emitter.sendMessageAndAwait(toMessage(event));
+                emitterFor(event).sendMessageAndAwait(toMessage(event));
             } catch (RuntimeException e) {
                 // Keep what was already sent; the rest is retried on the next tick, in order.
                 Log.warnf("Could not publish outbox event %d, will retry: %s", event.id, e.getMessage());
@@ -44,6 +48,10 @@ public class OutboxRelay {
             }
             outbox.markSent(event);
         }
+    }
+
+    private MutinyEmitter<String> emitterFor(OutboxEventEntity event) {
+        return OutboxRepository.WORKFLOW_RESULT.equals(event.type) ? workflowResults : invoiceEvents;
     }
 
     private static Message<String> toMessage(OutboxEventEntity event) {

@@ -26,4 +26,7 @@ public interface InvoiceActivities {
 
     /** Compensation: moves the invoice to Rejected. */
     void reject(UUID invoiceId, String reason);
+
+    /** Last step of every run: queues the workflow's final result (delivered or rejected) for Kafka. */
+    void publishResult(UUID invoiceId);
 }

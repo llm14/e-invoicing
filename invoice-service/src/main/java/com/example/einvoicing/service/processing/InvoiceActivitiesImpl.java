@@ -79,6 +79,16 @@ public class InvoiceActivitiesImpl implements InvoiceActivities {
         invoices.save(invoice.rejected(reason));
     }
 
+    @Override
+    public void publishResult(UUID invoiceId) {
+        var invoice = load(invoiceId);
+        if (!invoice.status().isTerminal()) {
+            // Retried by Temporal: the workflow only gets here after delivering or rejecting.
+            throw new IllegalStateException("invoice " + invoiceId + " has not finished: " + invoice.status());
+        }
+        invoices.recordResult(invoice);
+    }
+
     private Invoice load(UUID invoiceId) {
         return invoices.find(invoiceId)
                 .orElseThrow(() -> ApplicationFailure.newNonRetryableFailure(

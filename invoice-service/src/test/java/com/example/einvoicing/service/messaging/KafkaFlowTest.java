@@ -114,6 +114,54 @@ class KafkaFlowTest {
         assertThat(events.get(1).get("reason").asText()).contains("gross total must be positive");
     }
 
+    /** Waits for the result of one invoice on workflow.results, then lingers to catch duplicates. */
+    private static List<JsonNode> resultsFor(String number) throws Exception {
+        var results = new ArrayList<JsonNode>();
+        var deadline = Instant.now().plusSeconds(45);
+        Instant stopAt = null;
+        try (var consumer = consumer("workflow.results")) {
+            while (Instant.now().isBefore(stopAt != null ? stopAt : deadline)) {
+                for (var record : consumer.poll(Duration.ofMillis(500))) {
+                    var result = JSON.readTree(record.value());
+                    if (number.equals(result.get("number").asText())) {
+                        assertThat(record.key()).isEqualTo(result.get("invoiceId").asText());
+                        results.add(result);
+                        if (stopAt == null) {
+                            stopAt = Instant.now().plusSeconds(3);
+                        }
+                    }
+                }
+            }
+        }
+        return results;
+    }
+
+    @Test
+    void deliveredWorkflowPublishesExactlyOneResult() throws Exception {
+        var number = "KAFKA " + UUID.randomUUID();
+
+        publish("invoices.submitted", invoiceJson(number, "19.99"));
+
+        var results = resultsFor(number);
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).get("outcome").asText()).isEqualTo("DELIVERED");
+        assertThat(results.get(0).get("workflowId").asText())
+                .isEqualTo(results.get(0).get("invoiceId").asText());
+        assertThat(results.get(0).get("reason").isNull()).isTrue();
+    }
+
+    @Test
+    void rejectedWorkflowPublishesTheResultWithItsReason() throws Exception {
+        var number = "KAFKA " + UUID.randomUUID();
+
+        publish("invoices.submitted", invoiceJson(number, "0"));
+
+        var results = resultsFor(number);
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).get("outcome").asText()).isEqualTo("REJECTED");
+        assertThat(results.get(0).get("reason").asText()).contains("gross total must be positive");
+    }
+
     @Test
     void invoiceSubmittedOverRestAlsoPublishesEvents() throws Exception {
         var number = "REST " + UUID.randomUUID();

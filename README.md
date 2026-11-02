@@ -64,6 +64,15 @@ docker compose exec -it kafka /opt/kafka/bin/kafka-console-producer.sh \
 
 Then paste the JSON as a single line and press Enter.
 
+Kafka topics: `invoices.submitted` (in), `invoices.events` (every invoice state change),
+`workflow.results` (one message when a workflow ends, with outcome DELIVERED or REJECTED and the reason).
+Watch the results with:
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic workflow.results --from-beginning
+```
+
 Other endpoints: `GET /invoices/{id}`, `POST /invoices/{id}/cancel`.
 Watch the workflow run (workflow id = invoice id) in the Temporal UI at http://localhost:8233.
 A Postman collection is in `postman/`.
