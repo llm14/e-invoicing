@@ -81,8 +81,11 @@ A Postman collection is in `postman/`.
 
 ```bash
 ./gradlew test                              # default run, skips tests tagged "slow"
-./gradlew :invoice-workflows:test -PslowTests   # also runs them (~30s crash-recovery test)
+./gradlew test -PslowTests                  # also runs "slow" (~30s crash-recovery test) and "temporal-server" tests
 ```
+
+Tests tagged `temporal-server` need the docker-compose Temporal, because they check behaviour the
+in-memory test server cannot reproduce. The `invoice-service` tests also need the docker-compose stack.
 
 Running a test from IntelliJ's gutter icon always runs it, tag or not.
 
@@ -92,6 +95,42 @@ Running a test from IntelliJ's gutter icon always runs it, tag or not.
 docker compose down        # keep data
 docker compose down -v     # also wipe Postgres and Kafka volumes
 ```
+
+## Workflow behaviour
+
+What the Temporal workflow does when things go wrong (`InvoiceWorkflowImpl`):
+
+| Situation | What happens |
+|---|---|
+| Validation or signing fails for an infrastructure reason (database, key service) | Retried without an attempt limit (backoff from 1s up to 1 minute). The invoice waits in `SIGNING` and is not rejected |
+| The invoice breaks our business rules | `InvoiceInvalid` failure: not retried, invoice rejected |
+| Delivery fails because the recipient is unreachable | Retried without an attempt limit (backoff from 2s up to 1 minute) |
+| The recipient refuses the invoice for good | `DeliveryRefused` failure (`DeliveryRefusedException` in the delivery client): not retried, invoice rejected |
+| `POST /invoices/{id}/cancel` during validation or signing | Interrupts the step, including while it is retrying, and rejects the invoice. An attempt that is already running finishes first |
+| Cancel once delivery has started | No effect |
+
+Every failed attempt is logged with its attempt number. While a step retries, the Temporal UI
+(http://localhost:8233) shows its pending activity, attempt count and last failure.
+
+### Recovery sweep
+
+An invoice is stored before its workflow is started, and the two cannot be committed together. If
+Temporal is down at that moment, or a workflow later dies, the invoice would stay unfinished forever.
+A Temporal Schedule (`invoice-sweep`, created or updated at startup by `SweepSchedule`) runs
+`InvoiceSweepWorkflow` every minute. It starts the workflow of every unfinished invoice older than
+`app.sweep.min-age` that has no running workflow.
+
+- A workflow id can be reused only after a run that failed, timed out or was terminated (`ALLOW_DUPLICATE_FAILED_ONLY`), never after one that completed.
+- Terminating a workflow in the Temporal UI therefore does not stop an invoice for good: the sweep restarts it. To stop an invoice, cancel it.
+- If Temporal is down at startup, the app still starts and keeps retrying to create the schedule in the background.
+
+| Property | Default | Meaning |
+|---|---|---|
+| `app.sweep.interval` | `PT1M` | How often the sweep runs |
+| `app.sweep.min-age` | `PT2M` | Invoices younger than this are skipped |
+| `app.sweep.batch-size` | `500` | Most invoices restarted per run |
+| `app.temporal.shutdown-drain` | `PT30S` | How long a stopping worker waits for running activities to report |
+| `app.delivery.refusal-rate` | `0.0` | Simulated recipient: chance of refusing an invoice for good |
 
 ## Signing: process and code map
 
