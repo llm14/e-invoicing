@@ -14,6 +14,11 @@ public record SigningIdentity(PrivateKey privateKey, List<X509Certificate> chain
         chain = List.copyOf(chain);
     }
 
+    /** An identity whose private key stays in a {@link RemoteSigner} (KMS, HSM). */
+    public static SigningIdentity remote(RemoteSigner signer, List<X509Certificate> chain) {
+        return new SigningIdentity(new RemotePrivateKey(signer), chain);
+    }
+
     public X509Certificate certificate() {
         return chain.get(0);
     }

@@ -61,6 +61,26 @@ final class TestPki {
         return new Issued(keys, sign(builder, issuer.keys()));
     }
 
+    /** What a CA does with a CSR: issue a certificate for the requested subject and public key. */
+    static X509Certificate issueFromRequest(
+            Issued issuer,
+            org.bouncycastle.pkcs.PKCS10CertificationRequest request,
+            Instant notBefore,
+            Instant notAfter)
+            throws Exception {
+        var builder = new JcaX509v3CertificateBuilder(
+                new X500Name(issuer.certificate().getSubjectX500Principal().getName()),
+                serial(),
+                Date.from(notBefore),
+                Date.from(notAfter),
+                request.getSubject(),
+                new org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter()
+                        .getPublicKey(request.getSubjectPublicKeyInfo()));
+        builder.addExtension(Extension.basicConstraints, true, new BasicConstraints(false));
+        builder.addExtension(Extension.keyUsage, true, new KeyUsage(KeyUsage.digitalSignature));
+        return sign(builder, issuer.keys());
+    }
+
     private static X509Certificate sign(JcaX509v3CertificateBuilder builder, KeyPair signingKeys)
             throws Exception {
         var signer = new JcaContentSignerBuilder("SHA256withRSA").build(signingKeys.getPrivate());

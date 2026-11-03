@@ -1,6 +1,6 @@
 dependencies {
     api project(':invoice-domain')
 
-    // test-only: used to generate CA / leaf certificates
-    testImplementation libs.bouncycastle.pkix
+    // PKCS#10 certificate signing requests (CsrBuilder); also used by tests to generate CA / leaf certificates
+    implementation libs.bouncycastle.pkix
 }
