@@ -1,6 +1,8 @@
 package com.example.einvoicing.service.temporal;
 
 import com.example.einvoicing.service.processing.InvoiceActivitiesImpl;
+import com.example.einvoicing.service.processing.SweepActivitiesImpl;
+import com.example.einvoicing.workflow.InvoiceSweepWorkflowImpl;
 import com.example.einvoicing.workflow.InvoiceWorkflowImpl;
 import io.quarkus.logging.Log;
 import io.quarkus.runtime.ShutdownEvent;
@@ -33,6 +35,12 @@ public class TemporalRuntime {
     @Inject
     InvoiceActivitiesImpl activities;
 
+    @Inject
+    SweepActivitiesImpl sweepActivities;
+
+    @Inject
+    SweepSchedule sweepSchedule;
+
     private WorkflowServiceStubs service;
     private WorkerFactory factory;
     private WorkflowClient client;
@@ -43,10 +51,11 @@ public class TemporalRuntime {
         client = WorkflowClient.newInstance(service);
         factory = WorkerFactory.newInstance(client);
         var worker = factory.newWorker(taskQueue);
-        worker.registerWorkflowImplementationTypes(InvoiceWorkflowImpl.class);
-        worker.registerActivitiesImplementations(activities);
+        worker.registerWorkflowImplementationTypes(InvoiceWorkflowImpl.class, InvoiceSweepWorkflowImpl.class);
+        worker.registerActivitiesImplementations(activities, sweepActivities);
         factory.start();
         Log.infof("Temporal worker polling '%s' on %s", taskQueue, target);
+        sweepSchedule.ensureInBackground(service, taskQueue);
     }
 
     /**
@@ -55,6 +64,7 @@ public class TemporalRuntime {
      * running it a second time, for example delivering an invoice twice.
      */
     void stop(@Observes ShutdownEvent event) throws InterruptedException {
+        sweepSchedule.stop();
         factory.shutdown();
         factory.awaitTermination(shutdownDrain.toMillis(), TimeUnit.MILLISECONDS);
         if (!factory.isTerminated()) {

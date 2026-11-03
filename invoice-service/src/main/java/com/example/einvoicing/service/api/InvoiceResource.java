@@ -43,7 +43,7 @@ public class InvoiceResource {
         return Response.created(location).entity(InvoiceResponse.from(invoice)).build();
     }
 
-    /** Asks the running workflow to stop; takes effect at the next step boundary. */
+    /** Asks the running workflow to stop; it interrupts validation and signing but not delivery. */
     @POST
     @Path("/{id}/cancel")
     @Consumes(MediaType.WILDCARD)
