@@ -92,3 +92,69 @@ Running a test from IntelliJ's gutter icon always runs it, tag or not.
 docker compose down        # keep data
 docker compose down -v     # also wipe Postgres and Kafka volumes
 ```
+
+## Signing: process and code map
+
+How an invoice becomes a signed XML document, step by step, and which code does each step. Paths are
+relative to `invoice-crypto/src/main/java/com/example/einvoicing/crypto/` unless stated otherwise.
+
+The private key lives in a system we cannot read (AWS KMS in production). The application sends
+bytes to be signed and gets a signature back; the key never enters the JVM. The code that does this is
+in place and tested against an in-memory fake (`FakeKms`); the real KMS adapter is not written yet.
+
+### Phase 1: operator setup (once)
+
+| Process step | Code | Status |
+|---|---|---|
+| Create the key in KMS | none (an AWS action) | outside the code |
+| Read the public key from KMS | `CsrBuilder.publicKeyFromDer` parses what `kms:GetPublicKey` returns; the call itself is not written | half done |
+| Build the CSR, signed by KMS | `CsrBuilder.createPem`; internally `RemoteContentSigner.getSignature()` calls `RemoteSigner.sign(...)` for the one signature a CSR needs | done |
+| CA issues the certificate | none (external); tests use `TestPki.issueFromRequest` as a stand-in CA | outside the code |
+| Configure key ID, region, chain | `SignerProducer.xmlSigner()` in `invoice-service` supports only a local keystore or an ephemeral key today | **not built** |
+| Build the signing identity | `SigningIdentity.remote(signer, chain)` creates a `RemotePrivateKey`, whose constructor installs the JDK plug-in via `RemoteSignatureProvider.ensureInstalled()` | done |
+
+### Phase 2: every invoice (automatic)
+
+| Process step | Code |
+|---|---|
+| User submits JSON (REST or Kafka) | REST resource / Kafka consumer in `invoice-service`, which starts the workflow |
+| Validate business rules | `InvoiceActivitiesImpl.validate` |
+| Build the XML | `InvoiceXmlBuilder.build` |
+| Sign step | `InvoiceActivitiesImpl.sign`, which calls `signer.sign(xmlBuilder.build(...))` |
+| Fingerprint and sign | `EnvelopedXmlSigner.sign` builds the XMLDSig structure (canonicalization, SHA-256 digest, `RSA_SHA256`); the JDK computes the digest |
+| Ask KMS to sign | `EnvelopedXmlSigner` hands the `RemotePrivateKey` to the JDK, which finds `RemoteSignatureProvider.RemoteSignature.engineSign()`; that calls `RemoteSigner.sign(SignedInfo bytes)`, where a KMS adapter would call `kms:Sign` |
+| Attach signature and certificate | same method, using `SigningIdentity.chain()` for `KeyInfo/X509Data` |
+| Deliver | `InvoiceActivitiesImpl.deliver` sends the stored signed XML |
+
+Call chain of the signing step:
+
+```
+InvoiceActivitiesImpl.sign
+  -> EnvelopedXmlSigner.sign            (builds the Signature structure)
+    -> JDK XMLDSig                      (canonicalize + digest)
+      -> RemoteSignature.engineSign     (our JCA plug-in)
+        -> RemoteSigner.sign            (interface)
+          -> [KmsRemoteSigner]          <- missing piece; FakeKms in tests
+```
+
+Only the small `SignedInfo` block (digest plus algorithm details) is sent to the remote signer. The
+invoice text never leaves the application.
+
+### Phase 3: validation (what the recipient does)
+
+| Process step | Code |
+|---|---|
+| Entry point | `EnvelopedXmlSignatureValidator.validate`: requires exactly one signature covering the whole document |
+| Pick the verification key | `X509ChainKeySelector.select` takes the key from the certificate in the XML, only after the chain is validated |
+| Is the identity trusted? | `CertificateValidator.validate`: signer may sign, validity dates, chain reaches a trust anchor (revocation is not checked) |
+| Where trust anchors come from | `EnvelopedXmlSignatureValidator.forTrustedCertificates`, with `KeyStoreLoader.loadTrustAnchors` reading a trust store |
+
+The identity check runs before the signature check because the key must be trusted before it is used.
+
+### Still missing
+
+- `KmsRemoteSigner implements RemoteSigner`: the one class that talks to AWS (`kms:Sign` with
+  `MessageType=RAW` and `RSASSA_PKCS1_V1_5_SHA_256`, and `kms:GetPublicKey`).
+- `SignerProducer` does not know about KMS yet (key ID, region, certificate chain location).
+- No runnable entry point for the CSR step: `CsrBuilder` is only called from tests.
+- Certificate renewal and revocation checking.
