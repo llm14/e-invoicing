@@ -112,6 +112,7 @@ in place and tested against an in-memory fake (`FakeKms`); the real KMS adapter 
 | CA issues the certificate | none (external); tests use `TestPki.issueFromRequest` as a stand-in CA | outside the code |
 | Configure key ID, region, chain | `SignerProducer.xmlSigner()` in `invoice-service` supports only a local keystore or an ephemeral key today | **not built** |
 | Build the signing identity | `SigningIdentity.remote(signer, chain)` creates a `RemotePrivateKey`, whose constructor installs the JDK plug-in via `RemoteSignatureProvider.ensureInstalled()` | done |
+| Verify the setup when the app starts | `SigningStartupCheck` (`invoice-service`) calls `SigningSelfTest.check`: signs a probe document with the real signer and validates it against the trust store (`app.signing.truststore`, `app.signing.truststore-password`). A failure stops startup. Skipped, with a warning, when no trust store is set | done |
 
 ### Phase 2: every invoice (automatic)
 
@@ -157,4 +158,5 @@ The identity check runs before the signature check because the key must be trust
   `MessageType=RAW` and `RSASSA_PKCS1_V1_5_SHA_256`, and `kms:GetPublicKey`).
 - `SignerProducer` does not know about KMS yet (key ID, region, certificate chain location).
 - No runnable entry point for the CSR step: `CsrBuilder` is only called from tests.
-- Certificate renewal and revocation checking.
+- Certificate renewal and revocation checking, and a warning ahead of certificate expiry (the startup
+  self-test fails only once the certificate has already expired).
