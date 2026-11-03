@@ -82,7 +82,7 @@ public class InvoiceWorkflowImpl implements InvoiceWorkflow {
             }
             compensate(invoiceId, "cancelled by request");
         }
-        results.publishResult(invoiceId);
+        results.recordResult(invoiceId);
     }
 
     @Override

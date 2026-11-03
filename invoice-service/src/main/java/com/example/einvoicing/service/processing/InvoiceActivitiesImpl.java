@@ -80,7 +80,7 @@ public class InvoiceActivitiesImpl implements InvoiceActivities {
     }
 
     @Override
-    public void publishResult(UUID invoiceId) {
+    public void recordResult(UUID invoiceId) {
         var invoice = load(invoiceId);
         if (!invoice.status().isTerminal()) {
             // Retried by Temporal: the workflow only gets here after delivering or rejecting.

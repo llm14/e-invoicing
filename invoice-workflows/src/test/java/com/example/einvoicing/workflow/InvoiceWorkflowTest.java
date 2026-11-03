@@ -59,7 +59,7 @@ class InvoiceWorkflowTest {
 
         workflow.process(id);
 
-        assertThat(activities.calls).containsExactly("validate", "sign", "deliver", "publishResult");
+        assertThat(activities.calls).containsExactly("validate", "sign", "deliver", "recordResult");
         assertThat(workflow.getStatus()).isEqualTo("DELIVERED");
     }
 
@@ -73,7 +73,7 @@ class InvoiceWorkflowTest {
 
         workflow.process(id);
 
-        assertThat(activities.calls).containsExactly("validate", "reject:total is negative", "publishResult");
+        assertThat(activities.calls).containsExactly("validate", "reject:total is negative", "recordResult");
         assertThat(workflow.getStatus()).isEqualTo("REJECTED");
     }
 
@@ -107,7 +107,7 @@ class InvoiceWorkflowTest {
 
         assertThat(activities.calls.stream().filter("deliver"::equals).count()).isEqualTo(8);
         assertThat(activities.calls).element(activities.calls.size() - 2).asString().startsWith("reject:");
-        assertThat(activities.calls).last().isEqualTo("publishResult");
+        assertThat(activities.calls).last().isEqualTo("recordResult");
         assertThat(workflow.getStatus()).isEqualTo("REJECTED");
     }
 
@@ -121,7 +121,7 @@ class InvoiceWorkflowTest {
 
         workflow.process(id);
 
-        assertThat(activities.calls).containsExactly("validate", "sign", "reject:cancelled by request", "publishResult");
+        assertThat(activities.calls).containsExactly("validate", "sign", "reject:cancelled by request", "recordResult");
         assertThat(workflow.getStatus()).isEqualTo("REJECTED");
     }
 
@@ -172,7 +172,7 @@ class InvoiceWorkflowTest {
             // while an activity is in flight, so this part of the test takes about 30 real seconds.
             WorkflowStub.fromTyped(workflow).getResult(60, TimeUnit.SECONDS, Void.class);
 
-            assertThat(afterCrash.calls).containsExactly("sign", "deliver", "publishResult");
+            assertThat(afterCrash.calls).containsExactly("sign", "deliver", "recordResult");
             assertThat(workflow.getStatus()).isEqualTo("DELIVERED");
         } finally {
             secondActivityWorker.shutdownNow();
@@ -231,8 +231,8 @@ class InvoiceWorkflowTest {
         }
 
         @Override
-        public void publishResult(UUID invoiceId) {
-            calls.add("publishResult");
+        public void recordResult(UUID invoiceId) {
+            calls.add("recordResult");
         }
     }
 }

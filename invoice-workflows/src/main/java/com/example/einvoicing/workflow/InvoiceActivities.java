@@ -28,5 +28,5 @@ public interface InvoiceActivities {
     void reject(UUID invoiceId, String reason);
 
     /** Last step of every run: queues the workflow's final result (delivered or rejected) for Kafka. */
-    void publishResult(UUID invoiceId);
+    void recordResult(UUID invoiceId);
 }
