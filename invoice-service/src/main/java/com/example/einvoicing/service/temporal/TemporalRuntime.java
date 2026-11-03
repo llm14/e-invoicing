@@ -12,6 +12,8 @@ import io.temporal.worker.WorkerFactory;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /** Owns the connection to Temporal and runs the invoice worker inside this application. */
@@ -23,6 +25,10 @@ public class TemporalRuntime {
 
     @ConfigProperty(name = "app.temporal.task-queue")
     String taskQueue;
+
+    /** How long a stopping worker lets running activities finish and report before they are interrupted. */
+    @ConfigProperty(name = "app.temporal.shutdown-drain", defaultValue = "PT30S")
+    Duration shutdownDrain;
 
     @Inject
     InvoiceActivitiesImpl activities;
@@ -43,8 +49,18 @@ public class TemporalRuntime {
         Log.infof("Temporal worker polling '%s' on %s", taskQueue, target);
     }
 
-    void stop(@Observes ShutdownEvent event) {
+    /**
+     * Stops polling, then gives running activities time to finish and report their result. Closing
+     * the connection straight away would leave Temporal waiting for the activity's timeout and then
+     * running it a second time, for example delivering an invoice twice.
+     */
+    void stop(@Observes ShutdownEvent event) throws InterruptedException {
         factory.shutdown();
+        factory.awaitTermination(shutdownDrain.toMillis(), TimeUnit.MILLISECONDS);
+        if (!factory.isTerminated()) {
+            Log.warnf("Temporal worker still busy after %s, interrupting running activities", shutdownDrain);
+            factory.shutdownNow();
+        }
         service.shutdown();
     }
 
