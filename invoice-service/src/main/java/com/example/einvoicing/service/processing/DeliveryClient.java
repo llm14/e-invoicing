@@ -8,7 +8,8 @@ public interface DeliveryClient {
      * Sends the signed invoice to the recipient. The invoice id is the idempotency key: delivering
      * the same invoice twice must not create a duplicate on the recipient's side.
      *
-     * @throws RuntimeException if the recipient could not be reached (the caller may retry)
+     * @throws DeliveryRefusedException if the recipient refused the invoice permanently
+     * @throws RuntimeException any other failure means the recipient could not be reached (the caller retries)
      */
     void deliver(UUID invoiceId, String signedXml);
 }
