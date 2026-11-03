@@ -28,10 +28,11 @@ subprojects {
     }
 
     tasks.withType(Test).configureEach {
-        // Tests tagged "slow" are skipped unless run with -PslowTests
+        // Tests tagged "slow" (long) or "temporal-server" (need the docker-compose Temporal)
+        // are skipped unless run with -PslowTests
         useJUnitPlatform {
             if (!project.hasProperty('slowTests')) {
-                excludeTags 'slow'
+                excludeTags 'slow', 'temporal-server'
             }
         }
     }

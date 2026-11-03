@@ -7,13 +7,18 @@ import java.util.UUID;
  * Side-effecting steps of invoice processing. Implementations load the invoice by id (payloads
  * stay small) and must be idempotent, since Temporal may run an activity more than once.
  *
- * <p>An unrecoverable problem is reported with a non-retryable {@code ApplicationFailure} of type
- * {@link #INVALID_INVOICE}; any other exception is retried according to the workflow's policy.
+ * <p>An unrecoverable problem is reported with a non-retryable {@code ApplicationFailure}: of type
+ * {@link #INVALID_INVOICE} when our own rules reject the invoice, or {@link #DELIVERY_REFUSED} when
+ * the recipient refuses it for good. Any other exception is treated as an infrastructure problem
+ * and retried according to the workflow's policy.
  */
 @ActivityInterface
 public interface InvoiceActivities {
 
     String INVALID_INVOICE = "InvalidInvoice";
+
+    /** The recipient refused the invoice permanently; retrying cannot help. */
+    String DELIVERY_REFUSED = "DeliveryRefused";
 
     /** Checks business rules and moves the invoice to Validated. */
     void validate(UUID invoiceId);

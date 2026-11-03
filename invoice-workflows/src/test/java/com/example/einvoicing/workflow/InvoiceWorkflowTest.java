@@ -21,8 +21,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
+@Timeout(90) // a workflow that never finishes must fail the test, not hang the build
 class InvoiceWorkflowTest {
+
+    private static final String TASK_QUEUE = "invoice-test";
+    private static final String SWEEP_QUEUE = "sweep-test";
 
     private TestWorkflowEnvironment env;
     private FakeActivities activities;
@@ -31,9 +36,12 @@ class InvoiceWorkflowTest {
     void start() {
         env = TestWorkflowEnvironment.newInstance();
         activities = new FakeActivities();
-        var worker = env.newWorker(InvoiceWorkflow.TASK_QUEUE);
+        var worker = env.newWorker(TASK_QUEUE);
         worker.registerWorkflowImplementationTypes(InvoiceWorkflowImpl.class);
         worker.registerActivitiesImplementations(activities);
+        var sweepWorker = env.newWorker(SWEEP_QUEUE);
+        sweepWorker.registerWorkflowImplementationTypes(InvoiceSweepWorkflowImpl.class);
+        sweepWorker.registerActivitiesImplementations((SweepActivities) () -> 3);
         env.start();
     }
 
@@ -47,7 +55,7 @@ class InvoiceWorkflowTest {
                 .newWorkflowStub(
                         InvoiceWorkflow.class,
                         WorkflowOptions.newBuilder()
-                                .setTaskQueue(InvoiceWorkflow.TASK_QUEUE)
+                                .setTaskQueue(TASK_QUEUE)
                                 .setWorkflowId(id.toString())
                                 .build());
     }
@@ -96,33 +104,105 @@ class InvoiceWorkflowTest {
     }
 
     @Test
-    void permanentDeliveryFailureRejectsTheInvoice() {
+    void deliveryKeepsRetryingFarBeyondTheOldAttemptLimit() {
         var id = UUID.randomUUID();
+        var attempts = new AtomicInteger();
         activities.onDeliver = invoice -> {
-            throw new IllegalStateException("recipient unavailable");
+            if (attempts.incrementAndGet() <= 20) {
+                throw new IllegalStateException("recipient unavailable");
+            }
         };
         var workflow = newWorkflow(id);
 
         workflow.process(id);
 
-        assertThat(activities.calls.stream().filter("deliver"::equals).count()).isEqualTo(8);
-        assertThat(activities.calls).element(activities.calls.size() - 2).asString().startsWith("reject:");
-        assertThat(activities.calls).last().isEqualTo("recordResult");
+        assertThat(attempts).hasValue(21);
+        assertThat(activities.calls).noneMatch(call -> call.startsWith("reject:"));
+        assertThat(workflow.getStatus()).isEqualTo("DELIVERED");
+    }
+
+    @Test
+    void recipientRefusalRejectsTheInvoiceWithoutRetry() {
+        var id = UUID.randomUUID();
+        activities.onDeliver = invoice -> {
+            throw ApplicationFailure.newNonRetryableFailure(
+                    "recipient refused the invoice", InvoiceActivities.DELIVERY_REFUSED);
+        };
+        var workflow = newWorkflow(id);
+
+        workflow.process(id);
+
+        assertThat(activities.calls)
+                .containsExactly(
+                        "validate", "sign", "deliver", "reject:recipient refused the invoice", "recordResult");
         assertThat(workflow.getStatus()).isEqualTo("REJECTED");
     }
 
     @Test
-    void cancelSignalStopsProcessingAtTheNextStep() {
+    void signingOutageIsRetriedAndDoesNotRejectTheInvoice() {
         var id = UUID.randomUUID();
+        var attempts = new AtomicInteger();
+        activities.onSign = invoice -> {
+            if (attempts.incrementAndGet() <= 15) {
+                throw new IllegalStateException("key service unavailable");
+            }
+        };
         var workflow = newWorkflow(id);
-        activities.onSign = invoice -> env.getWorkflowClient()
-                .newWorkflowStub(InvoiceWorkflow.class, id.toString())
-                .cancel();
 
         workflow.process(id);
 
-        assertThat(activities.calls).containsExactly("validate", "sign", "reject:cancelled by request", "recordResult");
+        assertThat(attempts).hasValue(16);
+        assertThat(activities.calls).noneMatch(call -> call.startsWith("reject:"));
+        assertThat(workflow.getStatus()).isEqualTo("DELIVERED");
+    }
+
+    @Test
+    void cancelWhileSigningIsRetryingRejectsWithoutFurtherAttempts() {
+        var id = UUID.randomUUID();
+        var attempts = new AtomicInteger();
+        activities.onSign = invoice -> {
+            if (attempts.incrementAndGet() == 2) {
+                cancel(id);
+            }
+            throw new IllegalStateException("key service unavailable");
+        };
+        var workflow = newWorkflow(id);
+
+        workflow.process(id);
+
+        assertThat(activities.calls)
+                .containsExactly("validate", "sign", "sign", "reject:cancelled by request", "recordResult");
         assertThat(workflow.getStatus()).isEqualTo("REJECTED");
+    }
+
+    // "A step attempt that is already running finishes before a cancel takes effect" cannot be tested
+    // here: the in-memory test server never completes that case. It is covered against a real
+    // Temporal server in InvoiceWorkflowRealServerTest.
+
+    @Test
+    void cancelOnceDeliveryHasStartedHasNoEffect() {
+        var id = UUID.randomUUID();
+        var workflow = newWorkflow(id);
+        activities.onDeliver = invoice -> cancel(id);
+
+        workflow.process(id);
+
+        assertThat(activities.calls).containsExactly("validate", "sign", "deliver", "recordResult");
+        assertThat(workflow.getStatus()).isEqualTo("DELIVERED");
+    }
+
+    @Test
+    void sweepWorkflowReportsHowManyInvoicesItRestarted() {
+        var sweep = env.getWorkflowClient()
+                .newWorkflowStub(
+                        InvoiceSweepWorkflow.class,
+                        WorkflowOptions.newBuilder().setTaskQueue(SWEEP_QUEUE).build());
+
+        assertThat(sweep.sweep()).isEqualTo(3);
+    }
+
+    private void cancel(UUID id) {
+        env.getWorkflowClient().newWorkflowStub(InvoiceWorkflow.class, id.toString()).cancel();
     }
 
     /**
