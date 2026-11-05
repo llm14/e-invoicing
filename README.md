@@ -7,6 +7,8 @@ Modules: `invoice-domain`, `invoice-crypto`, `invoice-workflows` (Temporal workf
 
 - JDK 21+ (the Gradle wrapper is included)
 - Docker with Compose
+- Optional, for the Kubernetes setup: Docker Desktop with Kubernetes enabled, `kubectl` and
+  [Helm](https://helm.sh) (see "Kubernetes (Helm)"); [k9s](https://k9scli.io) is a handy terminal UI
 
 ## 1. Start the infrastructure
 
@@ -95,6 +97,143 @@ Running a test from IntelliJ's gutter icon always runs it, tag or not.
 docker compose down        # keep data
 docker compose down -v     # also wipe Postgres and Kafka volumes
 ```
+
+## Kubernetes (Helm)
+
+An alternative to docker compose: run the service and its dependencies in a local Kubernetes cluster
+(Docker Desktop's built-in one), closer to a production deployment. Two Helm charts in `helm/`:
+
+| Chart | What it deploys |
+|---|---|
+| `helm/invoice-service` | The service: Deployment (startup, liveness and readiness probes on `/q/health/*`), Service, ConfigMap and Secret. Optional signing keystore mount |
+| `helm/local-infra` | Local-only dependencies: Postgres (StatefulSet with a 1Gi volume), Kafka, Temporal and the Temporal UI. Single replicas, plaintext credentials, **not for production** |
+
+`invoice-service` does not deploy Postgres, Kafka or Temporal. Point it at them through values
+(`database.url`, `kafka.bootstrapServers`, `temporal.target`). `helm/invoice-service/values-local.yaml`
+points it at the in-cluster services created by `local-infra` (`postgres:5432`, `kafka:9092`, `temporal:7233`).
+
+### Prerequisites
+
+- Docker Desktop with Kubernetes enabled (Settings > Kubernetes). Check with `kubectl get nodes`.
+- Helm 4 (`winget install Helm.Helm`). Open a new terminal afterwards so the PATH is picked up.
+
+### 1. Build the image
+
+The repository has no Dockerfile or container-image extension, so build the image from the Quarkus
+fast-jar. The chart expects `invoice-service:1.0.0-SNAPSHOT` (`image.repository` and the chart's `appVersion`).
+Docker Desktop's cluster sees images built locally, so there is nothing to push.
+
+```bash
+./gradlew :invoice-service:quarkusBuild -x test
+
+cat > invoice-service/build/quarkus-app/Dockerfile <<'EOF'
+FROM eclipse-temurin:25-jre
+WORKDIR /app
+COPY lib/ lib/
+COPY app/ app/
+COPY quarkus/ quarkus/
+COPY quarkus-run.jar quarkus-run.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "quarkus-run.jar"]
+EOF
+
+docker build -t invoice-service:1.0.0-SNAPSHOT invoice-service/build/quarkus-app
+```
+
+`build/` is git-ignored and `gradlew clean` removes the Dockerfile, so recreate it after a clean.
+
+### 2. Install
+
+Install the infrastructure first and wait for it, then the service:
+
+```bash
+helm install infra helm/local-infra -n einvoicing-test --create-namespace --wait
+helm install invoice helm/invoice-service -n einvoicing-test \
+  -f helm/invoice-service/values-local.yaml --wait
+
+kubectl get pods -n einvoicing-test
+```
+
+Expect five pods, all `Running`: `invoice-invoice-service`, `postgres-0`, `kafka`, `temporal`, `temporal-ui`.
+Temporal may restart once or twice when the whole stack starts at the same time (its setup image
+exits if its own server is not answering yet). It settles by itself.
+
+### 3. Reach it from your machine
+
+Services are `ClusterIP`, so nothing is reachable from the browser until you open a port-forward.
+Run each in its own terminal and leave it running (or use `Shift+F` on the pod in k9s):
+
+```bash
+kubectl port-forward svc/temporal-ui 8233:8080 -n einvoicing-test          # http://localhost:8233
+kubectl port-forward svc/invoice-invoice-service 18080:80 -n einvoicing-test   # http://localhost:18080
+```
+
+The service is a REST API running with the production profile: there is no Quarkus Dev UI or Swagger
+page. Use `/q/health`, `/q/health/ready` and `GET /invoices/{id}` in a browser, and the `curl` command from
+"3. Try it" (with port `18080`) or the Postman collection to submit invoices. Follow the logs with
+`kubectl logs -f deploy/invoice-invoice-service -n einvoicing-test` (add `--tail=100`, or name the pod
+if a rollout is running). Workflows are in the Temporal UI.
+
+### Day to day
+
+```bash
+# change values or the chart
+helm upgrade invoice helm/invoice-service -n einvoicing-test -f helm/invoice-service/values-local.yaml
+helm history invoice -n einvoicing-test
+helm rollback invoice 1 -n einvoicing-test
+
+# new image with the same tag: rebuild it (step 1), then restart the pod
+kubectl rollout restart deploy/invoice-invoice-service -n einvoicing-test
+
+# remove
+helm uninstall invoice -n einvoicing-test
+helm uninstall infra -n einvoicing-test
+kubectl delete pvc data-postgres-0 -n einvoicing-test    # wipes the database
+kubectl delete ns einvoicing-test                        # everything, including the volume
+```
+
+`helm uninstall` leaves the Postgres volume behind, so the data survives a reinstall.
+
+Checks without a cluster: `helm lint helm/invoice-service`, `helm lint helm/local-infra` and
+`helm template t helm/invoice-service`.
+
+### Start and stop the cluster
+
+Docker Desktop's Kubernetes has no start or stop command of its own. Quitting Docker Desktop stops
+Docker and Kubernetes together; pods, releases and the Postgres volume come back when it restarts.
+To free resources without stopping the cluster:
+
+```bash
+kubectl scale deploy --all --replicas=0 -n einvoicing-test
+kubectl scale statefulset postgres --replicas=0 -n einvoicing-test
+# back up: Postgres first, wait for it, then the rest
+kubectl scale statefulset postgres --replicas=1 -n einvoicing-test
+kubectl scale deploy --all --replicas=1 -n einvoicing-test
+```
+
+Unticking "Enable Kubernetes" or "Reset Kubernetes Cluster" in Docker Desktop discards the cluster and
+its workloads; redeploy with the steps above.
+
+### Chart values
+
+Main `helm/invoice-service/values.yaml` settings:
+
+| Value | Default | Meaning |
+|---|---|---|
+| `image.repository`, `image.tag` | `invoice-service`, chart `appVersion` | Image to run |
+| `replicaCount` | `1` | Keep at 1 unless a shared signing keystore is configured: without a keystore each replica generates its own ephemeral signing key |
+| `database.url`, `database.username` | `jdbc:postgresql://postgres:5432/einvoicing`, `einvoicing` | Become `DB_URL` and `DB_USER` |
+| `database.password`, `database.existingSecret` | `einvoicing`, empty | The password goes in a Secret; set `existingSecret` to use your own |
+| `kafka.bootstrapServers` | `kafka:9092` | Becomes `KAFKA_BOOTSTRAP_SERVERS` |
+| `temporal.target` | `temporal:7233` | Becomes `TEMPORAL_TARGET` |
+| `extraEnv` | empty | Extra variables. Quarkus maps `APP_SWEEP_INTERVAL` to `app.sweep.interval`, and so on |
+| `signing.enabled` | `false` | Mounts a PKCS#12 keystore (and optional truststore) from existing Secrets; requires `signing.existingSecret` and `signing.passwordSecret` |
+| `terminationGracePeriodSeconds` | `45` | Must stay above `quarkus.shutdown.timeout` (35s) so running activities can drain |
+
+Why the in-cluster Kafka is separate from the compose one: compose Kafka advertises `localhost:9092`,
+which a pod cannot use, and the cluster's Postgres, Kafka and Temporal hold their own data, separate from
+the compose containers. `local-infra` pods set `enableServiceLinks: false`; without it Kubernetes injects
+variables such as `TEMPORAL_UI_PORT=tcp://...` that break the Temporal UI's configuration.
 
 ## Workflow behaviour
 
