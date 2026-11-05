@@ -1,0 +1,13 @@
+dependencyResolutionManagement {
+    repositories {
+        mavenCentral()
+    }
+    // Share the root version catalog so versions stay defined in one place
+    versionCatalogs {
+        libs {
+            from(files('../gradle/libs.versions.toml'))
+        }
+    }
+}
+
+rootProject.name = 'build-logic'

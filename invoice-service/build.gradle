@@ -1,4 +1,5 @@
 plugins {
+    id 'einvoicing.java-conventions'
     alias(libs.plugins.quarkus)
 }
 

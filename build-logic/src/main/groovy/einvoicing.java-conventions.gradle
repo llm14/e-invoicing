@@ -1,0 +1,39 @@
+plugins {
+    id 'java-library'
+}
+
+// Precompiled Groovy script plugins have no type-safe `libs` accessors,
+// so look the shared version catalog up explicitly.
+def libs = extensions.getByType(VersionCatalogsExtension).named('libs')
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+dependencies {
+    testImplementation platform(libs.findLibrary('junit-bom').get())
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation libs.findLibrary('assertj').get()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-parameters'
+}
+
+tasks.withType(Test).configureEach {
+    // Tests tagged "slow" (long) or "temporal-server" (need the docker-compose Temporal)
+    // are skipped unless run with -PslowTests
+    useJUnitPlatform {
+        if (!project.hasProperty('slowTests')) {
+            excludeTags 'slow', 'temporal-server'
+        }
+    }
+}
