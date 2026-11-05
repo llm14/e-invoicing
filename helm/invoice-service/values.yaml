@@ -1,0 +1,71 @@
+# Default values for invoice-service.
+# Postgres, Kafka and Temporal are NOT deployed by this chart: point it at existing hosts.
+
+replicaCount: 1
+
+image:
+  # Must match the image produced by `:invoice-service:build -Dquarkus.container-image.build=true`
+  repository: invoice-service
+  # Defaults to the chart appVersion when empty
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+database:
+  url: jdbc:postgresql://postgres:5432/einvoicing
+  username: einvoicing
+  # Used to create a Secret. Prefer existingSecret outside of local testing.
+  password: einvoicing
+  # Name of an existing Secret holding the password; when set, `password` is ignored.
+  existingSecret: ""
+  existingSecretKey: DB_PASSWORD
+
+kafka:
+  bootstrapServers: kafka:9092
+
+temporal:
+  target: temporal:7233
+
+# Extra environment variables (Quarkus maps APP_SWEEP_INTERVAL -> app.sweep.interval, etc.)
+extraEnv: []
+#  - name: APP_SWEEP_INTERVAL
+#    value: PT5M
+
+# Signing keystore (PKCS#12). Without it the service generates an ephemeral key (development only).
+signing:
+  enabled: false
+  # Existing Secret with the keystore file and (optionally) a truststore file
+  existingSecret: ""
+  keystoreKey: signer.p12
+  alias: signer
+  # Existing Secret holding the keystore password under passwordKey
+  passwordSecret: ""
+  passwordKey: APP_SIGNING_PASSWORD
+  # Optional startup self-test truststore (same Secret as the keystore)
+  truststoreKey: ""
+  truststorePasswordKey: APP_SIGNING_TRUSTSTORE_PASSWORD
+
+# Must exceed quarkus.shutdown.timeout (35s) so running activities can drain
+terminationGracePeriodSeconds: 45
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 384Mi
+  limits:
+    memory: 768Mi
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

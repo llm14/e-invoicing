@@ -1,0 +1,22 @@
+# Local development infrastructure for a Kubernetes test cluster (e.g. Docker Desktop).
+# Single replicas, plaintext credentials, no backups: NOT for production.
+# Mirrors the root docker-compose.yml, but reachable by in-cluster service names:
+#   postgres:5432 | kafka:9092 | temporal:7233 | temporal-ui:8080
+
+postgres:
+  image: postgres:17
+  database: einvoicing
+  username: einvoicing
+  password: einvoicing
+  storage: 1Gi
+  # Empty uses the cluster's default StorageClass
+  storageClassName: ""
+
+kafka:
+  image: apache/kafka:3.9.0
+
+temporal:
+  image: temporalio/auto-setup:1.28.1
+
+temporalUi:
+  image: temporalio/ui:2.39.0

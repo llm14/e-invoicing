@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "invoice-service.fullname" . }}
+  labels:
+    {{- include "invoice-service.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "invoice-service.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pods when the configuration changes
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "invoice-service.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "invoice-service.fullname" . }}
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "invoice-service.dbSecretName" . }}
+                  key: {{ .Values.database.existingSecretKey }}
+            {{- if .Values.signing.enabled }}
+            - name: APP_SIGNING_KEYSTORE
+              value: /etc/signing/{{ .Values.signing.keystoreKey }}
+            - name: APP_SIGNING_ALIAS
+              value: {{ .Values.signing.alias | quote }}
+            - name: APP_SIGNING_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "signing.passwordSecret is required when signing.enabled" .Values.signing.passwordSecret }}
+                  key: {{ .Values.signing.passwordKey }}
+            {{- if .Values.signing.truststoreKey }}
+            - name: APP_SIGNING_TRUSTSTORE
+              value: /etc/signing/{{ .Values.signing.truststoreKey }}
+            - name: APP_SIGNING_TRUSTSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.signing.passwordSecret }}
+                  key: {{ .Values.signing.truststorePasswordKey }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /q/health/started
+              port: http
+            periodSeconds: 3
+            failureThreshold: 40
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: http
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.signing.enabled }}
+          volumeMounts:
+            - name: signing
+              mountPath: /etc/signing
+              readOnly: true
+          {{- end }}
+      {{- if .Values.signing.enabled }}
+      volumes:
+        - name: signing
+          secret:
+            secretName: {{ required "signing.existingSecret is required when signing.enabled" .Values.signing.existingSecret }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

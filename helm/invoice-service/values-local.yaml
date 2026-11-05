@@ -1,0 +1,12 @@
+# Values for a local cluster running the helm/local-infra chart in the same namespace.
+# Install: helm install invoice helm/invoice-service -n <ns> -f helm/invoice-service/values-local.yaml
+database:
+  url: jdbc:postgresql://postgres:5432/einvoicing
+  username: einvoicing
+  password: einvoicing
+
+kafka:
+  bootstrapServers: kafka:9092
+
+temporal:
+  target: temporal:7233
