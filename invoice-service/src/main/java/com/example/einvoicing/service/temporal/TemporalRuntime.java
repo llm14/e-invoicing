@@ -1,6 +1,8 @@
 package com.example.einvoicing.service.temporal;
 
 import com.example.einvoicing.service.processing.InvoiceActivitiesImpl;
+import com.example.einvoicing.service.processing.SweepActivitiesImpl;
+import com.example.einvoicing.workflow.InvoiceSweepWorkflowImpl;
 import com.example.einvoicing.workflow.InvoiceWorkflowImpl;
 import io.quarkus.logging.Log;
 import io.quarkus.runtime.ShutdownEvent;
@@ -12,6 +14,8 @@ import io.temporal.worker.WorkerFactory;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /** Owns the connection to Temporal and runs the invoice worker inside this application. */
@@ -24,8 +28,18 @@ public class TemporalRuntime {
     @ConfigProperty(name = "app.temporal.task-queue")
     String taskQueue;
 
+    /** How long a stopping worker lets running activities finish and report before they are interrupted. */
+    @ConfigProperty(name = "app.temporal.shutdown-drain", defaultValue = "PT30S")
+    Duration shutdownDrain;
+
     @Inject
     InvoiceActivitiesImpl activities;
+
+    @Inject
+    SweepActivitiesImpl sweepActivities;
+
+    @Inject
+    SweepSchedule sweepSchedule;
 
     private WorkflowServiceStubs service;
     private WorkerFactory factory;
@@ -37,14 +51,26 @@ public class TemporalRuntime {
         client = WorkflowClient.newInstance(service);
         factory = WorkerFactory.newInstance(client);
         var worker = factory.newWorker(taskQueue);
-        worker.registerWorkflowImplementationTypes(InvoiceWorkflowImpl.class);
-        worker.registerActivitiesImplementations(activities);
+        worker.registerWorkflowImplementationTypes(InvoiceWorkflowImpl.class, InvoiceSweepWorkflowImpl.class);
+        worker.registerActivitiesImplementations(activities, sweepActivities);
         factory.start();
         Log.infof("Temporal worker polling '%s' on %s", taskQueue, target);
+        sweepSchedule.ensureInBackground(service, taskQueue);
     }
 
-    void stop(@Observes ShutdownEvent event) {
+    /**
+     * Stops polling, then gives running activities time to finish and report their result. Closing
+     * the connection straight away would leave Temporal waiting for the activity's timeout and then
+     * running it a second time, for example delivering an invoice twice.
+     */
+    void stop(@Observes ShutdownEvent event) throws InterruptedException {
+        sweepSchedule.stop();
         factory.shutdown();
+        factory.awaitTermination(shutdownDrain.toMillis(), TimeUnit.MILLISECONDS);
+        if (!factory.isTerminated()) {
+            Log.warnf("Temporal worker still busy after %s, interrupting running activities", shutdownDrain);
+            factory.shutdownNow();
+        }
         service.shutdown();
     }
 

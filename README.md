@@ -81,8 +81,11 @@ A Postman collection is in `postman/`.
 
 ```bash
 ./gradlew test                              # default run, skips tests tagged "slow"
-./gradlew :invoice-workflows:test -PslowTests   # also runs them (~30s crash-recovery test)
+./gradlew test -PslowTests                  # also runs "slow" (~30s crash-recovery test) and "temporal-server" tests
 ```
+
+Tests tagged `temporal-server` need the docker-compose Temporal, because they check behaviour the
+in-memory test server cannot reproduce. The `invoice-service` tests also need the docker-compose stack.
 
 Running a test from IntelliJ's gutter icon always runs it, tag or not.
 
@@ -92,6 +95,143 @@ Running a test from IntelliJ's gutter icon always runs it, tag or not.
 docker compose down        # keep data
 docker compose down -v     # also wipe Postgres and Kafka volumes
 ```
+
+## Workflow behaviour
+
+What the Temporal workflow does when things go wrong (`InvoiceWorkflowImpl`):
+
+| Situation | What happens |
+|---|---|
+| Validation or signing fails for an infrastructure reason (database, key service) | Retried without an attempt limit (backoff from 1s up to 1 minute). The invoice waits in `SIGNING` and is not rejected |
+| The invoice breaks our business rules | `InvoiceInvalid` failure: not retried, invoice rejected |
+| Delivery fails because the recipient is unreachable | Retried without an attempt limit (backoff from 2s up to 1 minute) |
+| The recipient refuses the invoice for good | `DeliveryRefused` failure (`DeliveryRefusedException` in the delivery client): not retried, invoice rejected |
+| `POST /invoices/{id}/cancel` during validation or signing | Interrupts the step, including while it is retrying, and rejects the invoice. An attempt that is already running finishes first |
+| Cancel once delivery has started | No effect |
+
+Every failed attempt is logged with its attempt number. While a step retries, the Temporal UI
+(http://localhost:8233) shows its pending activity, attempt count and last failure.
+
+### Recovery sweep
+
+An invoice is stored before its workflow is started, and the two cannot be committed together. If
+Temporal is down at that moment, or a workflow later dies, the invoice would stay unfinished forever.
+A Temporal Schedule (`invoice-sweep`, created or updated at startup by `SweepSchedule`) runs
+`InvoiceSweepWorkflow` every minute. It starts the workflow of every unfinished invoice older than
+`app.sweep.min-age` that has no running workflow.
+
+- A workflow id can be reused only after a run that failed, timed out or was terminated (`ALLOW_DUPLICATE_FAILED_ONLY`), never after one that completed.
+- Terminating a workflow in the Temporal UI therefore does not stop an invoice for good: the sweep restarts it. To stop an invoice, cancel it.
+- If Temporal is down at startup, the app still starts and keeps retrying to create the schedule in the background.
+
+| Property | Default | Meaning |
+|---|---|---|
+| `app.sweep.interval` | `PT1M` | How often the sweep runs |
+| `app.sweep.min-age` | `PT2M` | Invoices younger than this are skipped |
+| `app.sweep.batch-size` | `500` | Most invoices restarted per run |
+| `app.temporal.shutdown-drain` | `PT30S` | How long a stopping worker waits for running activities to report |
+| `app.delivery.refusal-rate` | `0.0` | Simulated recipient: chance of refusing an invoice for good |
+
+## Temporal workflows: process and code map
+
+How an invoice moves through Temporal, step by step, and which code does each step. Paths are
+relative to `invoice-workflows/src/main/java/com/example/einvoicing/workflow/` (workflow and activity
+interfaces) or `invoice-service/src/main/java/com/example/einvoicing/service/` (everything else).
+
+Two kinds of code, kept in two modules on purpose:
+
+- **Workflow code** (`invoice-workflows`) only decides the order of steps and what to do when one
+  fails: `InvoiceWorkflowImpl`, `InvoiceSweepWorkflowImpl`. It has no database, no HTTP and no Kafka,
+  because Temporal replays it from its history and it must behave the same every time.
+- **Activity code** (`invoice-service`) does the real work and the side effects:
+  `InvoiceActivitiesImpl`, `SweepActivitiesImpl`. Temporal may run an activity more than once, so each
+  one first checks the invoice's current status and does nothing if its step already happened.
+
+The Temporal server stores each workflow's history and hands tasks to workers. The worker runs inside
+the `invoice-service` process, polling the task queue `invoice-tasks`.
+
+### Phase 1: application start and stop
+
+| Process step | Code | Status |
+|---|---|---|
+| Connect to Temporal and start the worker | `temporal/TemporalRuntime.start`: creates the client and a worker on `app.temporal.task-queue`, registers both workflows and both activity classes, then starts polling. The connection is lazy, so the app starts even if Temporal is down | done |
+| Create or update the recovery schedule | `temporal/SweepSchedule.ensureInBackground`, then `createOrUpdate`: creates the `invoice-sweep` schedule, or updates it if it exists. If Temporal does not answer it retries every 10 seconds in the background | done |
+| Stop without losing results | `temporal/TemporalRuntime.stop`: stops polling, waits up to `app.temporal.shutdown-drain` for running activities to report, then interrupts what is left | done |
+
+### Phase 2: every invoice (automatic)
+
+| Process step | Code |
+|---|---|
+| User submits JSON (REST or Kafka) | `api/InvoiceResource.submit` or `messaging/InvoiceSubmissionConsumer.consume`, both calling `InvoiceIntake.receive` |
+| Store the invoice | `InvoiceService.submit` saves it as `Received` and queues its event in the outbox |
+| Start the workflow | `temporal/InvoiceWorkflows.start`: workflow id = invoice id, ID reuse only after a failed run. Returns as soon as Temporal accepts it |
+| A worker picks it up | `TemporalRuntime`'s worker runs `InvoiceWorkflowImpl.process(invoiceId)`; after a restart or crash Temporal replays the recorded history to rebuild its state |
+| Validate | `InvoiceWorkflowImpl.process` calls the `preDelivery` stub, which runs `InvoiceActivitiesImpl.validate` (rules in `processing/InvoiceValidator`) and saves `Validated` |
+| Sign | same stub, `InvoiceActivitiesImpl.sign`; see "Signing: process and code map" for what happens inside. Saves `Signed` |
+| Last chance to cancel | `InvoiceWorkflowImpl.failIfCancelled` |
+| Deliver | the `delivery` stub runs `InvoiceActivitiesImpl.deliver`, which calls `processing/DeliveryClient` (`SimulatedDeliveryClient`) and saves `Delivered` |
+| Report the result | the `results` stub runs `InvoiceActivitiesImpl.recordResult`, which queues one `workflow.results` event in the outbox; `messaging/OutboxRelay` publishes it to Kafka |
+
+Each step is a separate task on the Temporal server, so a crash between steps loses nothing: the
+workflow resumes at the next step, and a step that was running is retried.
+
+Call chain of one invoice:
+
+```
+InvoiceResource.submit / InvoiceSubmissionConsumer.consume
+  -> InvoiceIntake.receive
+    -> InvoiceService.submit             (Postgres: invoice + outbox row)
+    -> InvoiceWorkflows.start            (Temporal server records the workflow)
+         ... a workflow task waits on the 'invoice-tasks' queue ...
+      -> worker in TemporalRuntime
+        -> InvoiceWorkflowImpl.process   (decides the order; no side effects)
+          -> InvoiceActivitiesImpl.validate
+          -> InvoiceActivitiesImpl.sign
+          -> InvoiceActivitiesImpl.deliver
+          -> InvoiceActivitiesImpl.recordResult
+```
+
+### Phase 3: when something goes wrong
+
+| Situation | Code | What happens |
+|---|---|---|
+| Database or key service fails during validate or sign | the `preDelivery` stub in `InvoiceWorkflowImpl`: retry options with no attempt limit, backoff 1s to 1 minute | The step retries until it works; the invoice waits in `SIGNING` |
+| The invoice breaks a business rule | `InvoiceActivitiesImpl.validate` throws a non-retryable `InvoiceInvalid` failure (`InvoiceActivities.INVALID_INVOICE`) | `process` catches the `ActivityFailure` and calls `compensate`, which runs `InvoiceActivitiesImpl.reject`; the invoice is `Rejected` |
+| The recipient is unreachable | the `delivery` stub: no attempt limit, backoff 2s to 1 minute | `deliver` retries until the recipient answers |
+| The recipient refuses the invoice | `DeliveryClient` throws `DeliveryRefusedException`; `InvoiceActivitiesImpl.deliver` turns it into the non-retryable `DeliveryRefused` failure (`InvoiceActivities.DELIVERY_REFUSED`) | Same path as an invalid invoice: `compensate`, then `Rejected` |
+| User cancels during validate or sign | `InvoiceResource.cancel` -> `InvoiceWorkflows.cancel` sends a signal -> `InvoiceWorkflowImpl.cancel` cancels the scope that wraps validate and sign | The step is interrupted, even while retrying (an attempt that is already running finishes first); then `compensate` |
+| User cancels once delivery has started | `InvoiceWorkflowImpl.cancel` still sets its flag, but the only check of it (`failIfCancelled`) is before delivery | No effect |
+| The worker dies mid-step | the activity's start-to-close timeout (30s or 60s) in `InvoiceWorkflowImpl` | Temporal runs the step again on another worker; this is why activities check the status first. Test: `InvoiceWorkflowTest` (tag `slow`) |
+| The app is restarted | `TemporalRuntime.stop` | Running steps get up to 30 seconds to report; the workflow carries on after the restart |
+
+Whatever happens, `process` ends by running `recordResult`, so every workflow publishes exactly one
+result (`DELIVERED` or `REJECTED`, with the reason).
+
+### Phase 4: recovery (every minute, automatic)
+
+| Process step | Code |
+|---|---|
+| The schedule fires | the Temporal Schedule `invoice-sweep` (`SweepSchedule`); if a run is still going, the next tick is skipped |
+| Run the sweep | `InvoiceSweepWorkflowImpl.sweep` calls `SweepActivitiesImpl.restartStuckInvoices` |
+| Find unfinished invoices | `InvoiceService.unfinishedReceivedBefore` -> `persistence/InvoiceRepository.findUnfinishedIdsReceivedBefore`: not `Delivered` or `Rejected`, older than `app.sweep.min-age`, at most `app.sweep.batch-size` |
+| Restart the missing workflows | `InvoiceWorkflows.startIfNotRunning`: Temporal answers "already started" for a running or completed workflow, which is ignored; a failed or terminated one is started again and resumes at the right step |
+
+### Watching it run
+
+- Temporal UI (http://localhost:8233): the workflow with id = invoice id, its history, and for a step
+  that is retrying, its attempt count and last failure.
+- Application log: one warning per failed attempt, with the attempt number (`InvoiceActivitiesImpl.attempt`).
+- Query `InvoiceWorkflow.getStatus` returns `VALIDATING`, `SIGNING`, `DELIVERING`, `DELIVERED` or
+  `REJECTED`. Only tests use it; the REST API reads the status from Postgres.
+
+### Still missing
+
+- The real recipient may or may not deduplicate by invoice id. Until that is confirmed, a delivery
+  repeated after a crash could reach the recipient twice.
+- No workflow versioning and no replay test (deliberately left out): changing `InvoiceWorkflowImpl`
+  while workflows are running could break them.
+- Nothing alerts when an invoice has been retrying for a long time; only the log and the Temporal UI show it.
+- Terminating a workflow in the Temporal UI does not stop an invoice: the sweep restarts it. Use cancel.
 
 ## Signing: process and code map
 

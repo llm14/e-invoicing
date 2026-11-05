@@ -23,8 +23,8 @@ public class InvoiceIntake {
         try {
             workflows.start(invoice.id());
         } catch (RuntimeException e) {
-            // The invoice is stored but processing did not start; it stays RECEIVED.
-            // TODO: recover with a periodic sweep of invoices stuck in RECEIVED.
+            // The invoice is stored but processing did not start; it stays RECEIVED until the
+            // recovery sweep (InvoiceSweepWorkflow) starts its workflow.
             Log.errorf(e, "Could not start workflow for invoice %s", invoice.id());
         }
         return invoice;

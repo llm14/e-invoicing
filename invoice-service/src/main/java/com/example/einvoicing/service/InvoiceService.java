@@ -7,6 +7,8 @@ import com.example.einvoicing.service.persistence.InvoiceRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -46,5 +48,11 @@ public class InvoiceService {
     @Transactional
     public Optional<Invoice> find(UUID id) {
         return repository.find(id);
+    }
+
+    /** Oldest unfinished invoices received before the cutoff, for the recovery sweep. */
+    @Transactional
+    public List<UUID> unfinishedReceivedBefore(Instant cutoff, int limit) {
+        return repository.findUnfinishedIdsReceivedBefore(cutoff, limit);
     }
 }

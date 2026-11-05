@@ -1,9 +1,12 @@
 package com.example.einvoicing.workflow;
 
+import io.temporal.activity.ActivityCancellationType;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
 import io.temporal.failure.ActivityFailure;
 import io.temporal.failure.ApplicationFailure;
+import io.temporal.failure.CanceledFailure;
+import io.temporal.workflow.CancellationScope;
 import io.temporal.workflow.Workflow;
 import java.time.Duration;
 import java.util.UUID;
@@ -11,19 +14,32 @@ import java.util.UUID;
 public class InvoiceWorkflowImpl implements InvoiceWorkflow {
 
     private static final String CANCELLED = "cancelled";
+    private static final String CANCELLED_REASON = "cancelled by request";
 
-    private final InvoiceActivities local = Workflow.newActivityStub(
+    /**
+     * Validation and signing retry every failure except an invalid invoice, with no attempt limit:
+     * an outage of the database or the key service must delay an invoice, not reject it. Waiting
+     * for a cancelled attempt to finish means a cancel never leaves a step running in the
+     * background that could still change the invoice after it has been rejected.
+     */
+    private final InvoiceActivities preDelivery = Workflow.newActivityStub(
             InvoiceActivities.class,
             ActivityOptions.newBuilder()
                     .setStartToCloseTimeout(Duration.ofSeconds(30))
+                    .setCancellationType(ActivityCancellationType.WAIT_CANCELLATION_COMPLETED)
                     .setRetryOptions(RetryOptions.newBuilder()
-                            .setMaximumAttempts(3)
+                            .setInitialInterval(Duration.ofSeconds(1))
+                            .setBackoffCoefficient(2.0)
+                            .setMaximumInterval(Duration.ofMinutes(1))
                             .setDoNotRetry(InvoiceActivities.INVALID_INVOICE)
                             .build())
                     .build());
 
-    /** The recipient can be down for a while, so delivery backs off and retries for longer. */
-    private final InvoiceActivities remote = Workflow.newActivityStub(
+    /**
+     * The recipient can be down for a long time, and a signed invoice may already have reached it,
+     * so delivery keeps retrying. Only the recipient refusing the invoice for good ends it.
+     */
+    private final InvoiceActivities delivery = Workflow.newActivityStub(
             InvoiceActivities.class,
             ActivityOptions.newBuilder()
                     .setStartToCloseTimeout(Duration.ofSeconds(60))
@@ -31,8 +47,7 @@ public class InvoiceWorkflowImpl implements InvoiceWorkflow {
                             .setInitialInterval(Duration.ofSeconds(2))
                             .setBackoffCoefficient(2.0)
                             .setMaximumInterval(Duration.ofMinutes(1))
-                            .setMaximumAttempts(8)
-                            .setDoNotRetry(InvoiceActivities.INVALID_INVOICE)
+                            .setDoNotRetry(InvoiceActivities.INVALID_INVOICE, InvoiceActivities.DELIVERY_REFUSED)
                             .build())
                     .build());
 
@@ -60,34 +75,49 @@ public class InvoiceWorkflowImpl implements InvoiceWorkflow {
 
     private String status = "VALIDATING";
     private boolean cancelRequested;
+    private CancellationScope beforeDelivery;
 
     @Override
     public void process(UUID invoiceId) {
         try {
-            local.validate(invoiceId);
-            failIfCancelled();
-
-            status = "SIGNING";
-            local.sign(invoiceId);
+            runBeforeDelivery(invoiceId);
             failIfCancelled();
 
             status = "DELIVERING";
-            remote.deliver(invoiceId);
+            delivery.deliver(invoiceId);
             status = "DELIVERED";
+        } catch (CanceledFailure e) {
+            compensate(invoiceId, CANCELLED_REASON);
         } catch (ActivityFailure e) {
-            compensate(invoiceId, reasonOf(e));
+            compensate(invoiceId, e.getCause() instanceof CanceledFailure ? CANCELLED_REASON : reasonOf(e));
         } catch (ApplicationFailure e) {
             if (!CANCELLED.equals(e.getType())) {
                 throw e;
             }
-            compensate(invoiceId, "cancelled by request");
+            compensate(invoiceId, CANCELLED_REASON);
         }
         results.recordResult(invoiceId);
+    }
+
+    /** Runs validate and sign in a scope that {@link #cancel()} can interrupt. */
+    private void runBeforeDelivery(UUID invoiceId) {
+        beforeDelivery = Workflow.newCancellationScope(() -> {
+            preDelivery.validate(invoiceId);
+            status = "SIGNING";
+            preDelivery.sign(invoiceId);
+        });
+        if (cancelRequested) {
+            beforeDelivery.cancel(); // the signal arrived before the scope existed
+        }
+        beforeDelivery.run();
     }
 
     @Override
     public void cancel() {
         cancelRequested = true;
+        if (beforeDelivery != null) {
+            beforeDelivery.cancel();
+        }
     }
 
     @Override
