@@ -1,5 +1,10 @@
 # Values for a local cluster running the helm/local-infra chart in the same namespace.
 # Install: helm install invoice helm/invoice-service -n <ns> -f helm/invoice-service/values-local.yaml
+# Docker Desktop binds LoadBalancer Services to localhost: http://localhost:8080, no port-forward needed
+service:
+  type: LoadBalancer
+  port: 8080
+
 database:
   url: jdbc:postgresql://postgres:5432/einvoicing
   username: einvoicing

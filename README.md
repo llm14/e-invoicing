@@ -160,17 +160,30 @@ exits if its own server is not answering yet). It settles by itself.
 
 ### 3. Reach it from your machine
 
-Services are `ClusterIP`, so nothing is reachable from the browser until you open a port-forward.
-Run each in its own terminal and leave it running (or use `Shift+F` on the pod in k9s):
+With the local values the charts publish three LoadBalancer Services, which Docker Desktop binds to
+localhost. No port-forward is needed:
 
-```bash
-kubectl port-forward svc/temporal-ui 8233:8080 -n einvoicing-test          # http://localhost:8233
-kubectl port-forward svc/invoice-invoice-service 18080:80 -n einvoicing-test   # http://localhost:18080
-```
+| What | Address |
+|---|---|
+| The service (REST API) | http://localhost:8080 |
+| Temporal UI | http://localhost:8233 |
+| Postgres (db/user/password: `einvoicing`) | `localhost:5433` |
+
+They come from `service.type: LoadBalancer` in `helm/invoice-service/values-local.yaml` and the `expose`
+block of `helm/local-infra/values.yaml` (`expose.enabled`, `postgresPort`, `temporalUiPort`). The in-cluster
+Services (`postgres:5432`, `temporal-ui:8080`) are unchanged, because other pods use them.
+
+- Docker Desktop binds these ports on all interfaces, not only localhost. Postgres is published with a
+  well-known password, so check that your firewall blocks inbound connections to 5433, or set
+  `expose.enabled=false` and use `kubectl port-forward svc/postgres 5433:5432 -n einvoicing-test` instead.
+- Ports 8080 and 8233 clash with `quarkusDev` and with docker compose's Temporal UI. Stop those first, or
+  change the ports in the values.
+- This relies on Docker Desktop. On other clusters a LoadBalancer Service stays `<pending>`; use
+  `kubectl port-forward` (or `Shift+F` on the pod in k9s) there.
 
 The service is a REST API running with the production profile: there is no Quarkus Dev UI or Swagger
 page. Use `/q/health`, `/q/health/ready` and `GET /invoices/{id}` in a browser, and the `curl` command from
-"3. Try it" (with port `18080`) or the Postman collection to submit invoices. Follow the logs with
+"3. Try it" or the Postman collection to submit invoices. Follow the logs with
 `kubectl logs -f deploy/invoice-invoice-service -n einvoicing-test` (add `--tail=100`, or name the pod
 if a rollout is running). Workflows are in the Temporal UI.
 

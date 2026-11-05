@@ -3,6 +3,15 @@
 # Mirrors the root docker-compose.yml, but reachable by in-cluster service names:
 #   postgres:5432 | kafka:9092 | temporal:7233 | temporal-ui:8080
 
+# Publish Postgres and the Temporal UI on localhost through LoadBalancer Services (Docker Desktop
+# binds them to localhost; other clusters will not). Replaces `kubectl port-forward`.
+# Postgres uses 5433 so it does not clash with docker compose's 5432. The Temporal UI uses 8233, the
+# same port as compose's UI, so stop compose (or change the port) before using both.
+expose:
+  enabled: true
+  postgresPort: 5433
+  temporalUiPort: 8233
+
 postgres:
   image: postgres:17
   database: einvoicing
